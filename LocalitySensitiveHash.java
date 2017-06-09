@@ -24,54 +24,77 @@ import org.apache.hadoop.fs.FileUtil;
 import org.apache.hadoop.mapreduce.lib.input.*;
 import org.apache.hadoop.mapreduce.lib.output.*;
 
-public class Transform{
-	public static class TransformMap extends Mapper<LongWritable, Text, Text, Text> {
+public class LocalitySensitiveHash{
+	public static class LSHMap extends Mapper<LongWritable, Text, Text, Text> {
 		//@Override
 		public void map(LongWritable key, Text value, Context context
                     ) throws IOException, InterruptedException {
-			//input: <row,col,1>
-			//<K,V> = <colId, (rowId, 1)> -> only throw if the value is 1
+			Configuration conf = context.getConfiguration();
+
+			String rowPerBand = conf.get("rowPerBand");
 			String[] data = value.toString().split(",");
-			context.write(new Text(data[1]), new Text(data[0]));
+			int bandNum = Intrger.parseInt(data[0])/Intrger.parseInt(rowPerBand);
+			int newRowId = Intrger.parseInt(data[0])%Intrger.parseInt(rowPerBand);
+			context.write(new Text(Integer.toString(bandNum)), new Text(Integer.toString(newRowId)+","+data[1]+","+data[2]));
 			
 		}
 	}
 	
-	public static class TransformReduce extends Reducer<Text, Text, Text, Text> {
+	public static class LSHReduce extends Reducer<Text, Text, Text, Text> {
 
 		@Override
 		public void reduce(Text key, Iterable<Text> values, Context context) throws IOException, InterruptedException {
 			Configuration conf = context.getConfiguration();
-			int numOfRows = Integer.parseInt(conf.get("numOfShingles"));//numOfShingles
-			int[] row = new int[numOfRows];
-			Arrays.fill(row, 0);
+
+			int rowPerBand = Integer.toString(conf.get("rowPerBand"));
+			int document = Integer.toString(conf.get("document"));
+			int[][] multi = new int[document][rowPerBand];
+			HashMap<String, List<Integer>> LSH = new HashMap<String, List<Integer>>();
+
+
 			for(Text val : values){
-				int rowId = Integer.parseInt(val.toString());
-				row[rowId] = 1;
+				String[] data = val.toString().split(",");
+				int rowId = Integer.parseInt(val.toString(data[0]));
+				int colId = Integer.parseInt(val.toString(data[1]));
+				int value = Integer.parseInt(val.toString(data[2]));
+				multi[colId][rowId] = value; //inserse row & column
 			}
-			StringBuilder result = new StringBuilder();
-			result.append("M,");
-			result.append(key.toString());
-			result.append(",");
-			for(int i=0; i<numOfRows; i++){
-				result.append(Integer.toString(row[i]));
+			for(int i=0;i<document;i++){
+				StringBuilder signature = new StringBuilder();
+				for(int j=0;j<rowPerBand;j++){
+					signature.append(multi[i][j]);
+				}
+				if(LSH.get(signature.toString()) == null){
+					LSH.put(signature.toString(),new ArrayList<Integer>());
+				}
+				List<Integer> temp = LSH.get(signature.toString());
+				temp.add(i);
+				LSH.put(signature.toString(),temp);
 			}
-			context.write(null, new Text(result.toString()));
+			
+
+			for (Object keyItr : LSH.keySet()){
+				if(LSH.get(keyItr).size() >= 2){
+					context.write(null, new Text(LSH.get(keyItr).toString()));
+				}
+			}
+			
 		}
 			
 	}
 	
-	public int run(int numOfShingles) throws Exception {
+	public int run(int rowPerBand,int document) throws Exception {
 		Configuration conf = new Configuration();
 		//Save params
-		conf.set("numOfShingles",Integer.toString(numOfShingles));
+		conf.set("rowPerBand",Integer.toString(rowPerBand));
+		conf.set("document",Integer.toString(document));
 		
-		Job job = new Job(conf,"Transform");
+		Job job = new Job(conf,"LSH");
 		
-		job.setJarByClass(Transform.class);
-		job.setMapperClass(TransformMap.class);
+		job.setJarByClass(LocalitySensitiveHash.class);
+		job.setMapperClass(LSHMap.class);
 		//job.setCombinerClass(Reduce.class);
-		job.setReducerClass(TransformReduce.class);
+		job.setReducerClass(LSHReduce.class);
 		//mapOutput,reduceOutput
 		job.setMapOutputKeyClass(Text.class);
 		job.setMapOutputValueClass(Text.class);
